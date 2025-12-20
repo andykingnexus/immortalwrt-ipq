@@ -1,0 +1,107 @@
+name: Build ImmortalWrt AX18 (Final)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+env:
+  # 您的 ImmortalWrt 仓库作为源代码
+  REPO_URL: https://github.com/VIKINGYFY/immortalwrt
+  REPO_BRANCH: main
+  CONFIG_FILE: ax18nano.config
+  FIRMWARE_NAME: immortalwrt-ax18
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository (Source Code)
+        # 将您的ImmortalWrt源码克隆到工作空间的根目录
+        uses: actions/checkout@v4
+
+      - name: Set up environment and install dependencies
+        run: |
+          sudo timedatectl set-timezone "$TZ"
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison gawk \
+            libncurses5-dev libncursesw5-dev zlib1g-dev gettext \
+            libssl-dev python3 python3-distutils python3-setuptools \
+            rsync unzip wget git subversion ccache
+
+      - name: Detect CPU cores and setup PATH
+        # 检测CPU核心数并设置ccache路径
+        run: |
+          echo "THREAD_COUNT=$(nproc)" >> $GITHUB_ENV
+          mkdir -p ccache
+          echo "PATH=$(pwd)/ccache:$PATH" >> $GITHUB_ENV
+          ccache -M 5G
+          ccache -s
+
+      - name: Restore build cache
+        # 缓存dl目录和ccache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ccache
+            dl
+          key: ${{ runner.os }}-immortalwrt-${{ hashFiles('ax18nano.config', 'custom-files/**') }}
+          restore-keys: |
+            ${{ runner.os }}-immortalwrt-
+
+      - name: Update feeds
+        # 在根目录运行feeds更新
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Load custom config and files
+        run: |
+          if [ ! -f "$CONFIG_FILE" ]; then
+            echo "ERROR: Config file $CONFIG_FILE not found!"
+            exit 1
+          fi
+          # 直接将配置文件复制到根目录下的 .config
+          cp "$CONFIG_FILE" ./.config
+
+          if [ -d "custom-files" ]; then
+            echo "Custom files found. Copying to build root."
+            # 将 custom-files 复制到 OpenWrt 源码的 files/ 目录中
+            mkdir -p ./files/
+            cp -rf ./custom-files/* ./files/
+          else
+            echo "No custom files found. Skipping."
+          fi
+
+          # 在根目录运行 make defconfig
+          make defconfig
+
+      - name: Download package sources
+        id: download
+        run: |
+          make download -j"${THREAD_COUNT}"
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: Build firmware
+        id: compile
+        run: |
+          # 开始编译
+          make -j"${THREAD_COUNT}" || make -j1 V=s
+
+      - name: Organize firmware files
+        if: steps.compile.outcome == 'success'
+        run: |
+          # 找到固件目录并设置路径
+          cd bin/targets/*/*
+          rm -rf packages
+          echo "FIRMWARE_PATH=$(pwd)" >> $GITHUB_ENV
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        if: steps.compile.outcome == 'success'
+        with:
+          name: ${{ env.FIRMWARE_NAME }}
+          path: ${{ env.FIRMWARE_PATH }}
