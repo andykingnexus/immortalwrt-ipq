@@ -7,9 +7,6 @@ on:
       - main
 
 env:
-  # 您的 ImmortalWrt 仓库作为源代码
-  REPO_URL: https://github.com/VIKINGYFY/immortalwrt
-  REPO_BRANCH: main
   CONFIG_FILE: nikki.config
   FIRMWARE_NAME: immortalwrt-ax18
   TZ: Asia/Shanghai
@@ -19,89 +16,84 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout repository (Source Code)
-        # 将您的ImmortalWrt源码克隆到工作空间的根目录
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up environment and install dependencies
+      # 🔥 关键步骤：释放 GitHub runner 磁盘空间
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/lib/jvm
+          sudo apt-get clean
+          df -h
+
+      - name: Install build dependencies
         run: |
           sudo timedatectl set-timezone "$TZ"
           sudo apt-get update
-          sudo apt-get install -y build-essential flex bison gawk \
-            libncurses5-dev libncursesw5-dev zlib1g-dev gettext \
-            libssl-dev python3 python3-distutils python3-setuptools \
-            rsync unzip wget git subversion ccache
+          sudo apt-get install -y \
+            build-essential flex bison gawk \
+            libncurses5-dev libncursesw5-dev \
+            zlib1g-dev gettext libssl-dev \
+            python3 python3-setuptools \
+            rsync unzip wget git subversion
 
-      - name: Detect CPU cores and setup PATH
-        # 检测CPU核心数并设置ccache路径
+      - name: Detect CPU cores
         run: |
           echo "THREAD_COUNT=$(nproc)" >> $GITHUB_ENV
-          mkdir -p ccache
-          echo "PATH=$(pwd)/ccache:$PATH" >> $GITHUB_ENV
-          ccache -M 5G
-          ccache -s
 
-      - name: Restore build cache
-        # 缓存dl目录和ccache
+      # ✅ 只缓存 dl，不缓存 ccache（避免爆盘）
+      - name: Restore dl cache
         uses: actions/cache@v4
         with:
-          path: |
-            ccache
-            dl
-          key: ${{ runner.os }}-immortalwrt-${{ hashFiles('nikki.config', 'custom-files/**') }}
+          path: dl
+          key: ${{ runner.os }}-immortalwrt-dl
           restore-keys: |
-            ${{ runner.os }}-immortalwrt-
+            ${{ runner.os }}-immortalwrt-dl
 
       - name: Update feeds
-        # 在根目录运行feeds更新
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Load custom config and files
+      - name: Load config and custom files
         run: |
           if [ ! -f "$CONFIG_FILE" ]; then
             echo "ERROR: Config file $CONFIG_FILE not found!"
             exit 1
           fi
-          # 直接将配置文件复制到根目录下的 .config
-          cp "$CONFIG_FILE" ./.config
+
+          cp "$CONFIG_FILE" .config
 
           if [ -d "custom-files" ]; then
-            echo "Custom files found. Copying to build root."
-            # 将 custom-files 复制到 OpenWrt 源码的 files/ 目录中
-            mkdir -p ./files/
-            cp -rf ./custom-files/* ./files/
-          else
-            echo "No custom files found. Skipping."
+            mkdir -p files
+            cp -rf custom-files/* files/
           fi
 
-          # 在根目录运行 make defconfig
           make defconfig
 
-      - name: Download package sources
-        id: download
+      - name: Download sources
         run: |
           make download -j"${THREAD_COUNT}"
           find dl -size -1024c -exec rm -f {} \;
 
       - name: Build firmware
-        id: compile
         run: |
-          # 开始编译
-          make -j"${THREAD_COUNT}" || make -j1 V=s
+          make -j"$((THREAD_COUNT - 1))" || make -j1 V=s
 
-      - name: Organize firmware files
-        if: steps.compile.outcome == 'success'
+      - name: Prepare firmware directory
+        if: success()
         run: |
-          # 找到固件目录并设置路径
           cd bin/targets/*/*
           rm -rf packages
           echo "FIRMWARE_PATH=$(pwd)" >> $GITHUB_ENV
+          ls -lh
 
       - name: Upload firmware artifact
+        if: success()
         uses: actions/upload-artifact@v4
-        if: steps.compile.outcome == 'success'
         with:
           name: ${{ env.FIRMWARE_NAME }}
           path: ${{ env.FIRMWARE_PATH }}
