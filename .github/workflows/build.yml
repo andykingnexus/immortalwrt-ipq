@@ -7,7 +7,7 @@ on:
       - main
 
 env:
-  CONFIG_FILE: nikki.config
+  CONFIG_FILE: ax18nano.config
   FIRMWARE_NAME: immortalwrt-ax18
   TZ: Asia/Shanghai
 
